@@ -4,4 +4,10 @@ Thumbs.db
 *.tmp
 *.temp
 *.log
-
+.env
+.env.*
+!.env.example
+service-account*.json
+credentials*.json
+node_modules/
+_site/

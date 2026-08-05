@@ -1,158 +1,64 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="theme-color" content="#0b4f8a" />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b4f8a">
+  <meta name="description" content="مخطط عربي لمسارات توزيع سليمة">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: blob: https://tiles.openfreemap.org https://*.openstreetmap.org; connect-src 'self' https://tiles.openfreemap.org https://*.openfreemap.org https://router.project-osrm.org; worker-src 'self' blob:; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests">
+  <meta http-equiv="Permissions-Policy" content="geolocation=(self), camera=(), microphone=()">
+  <meta http-equiv="X-Content-Type-Options" content="nosniff">
   <title>سليمة | مخطط مسارات التوزيع</title>
-  <link rel="preconnect" href="https://unpkg.com" />
-  <link rel="preconnect" href="https://tile.openstreetmap.org" />
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./assets/icon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.6.2/dist/maplibre-gl.css" crossorigin="anonymous">
+  <link rel="stylesheet" href="./css/styles.css">
 </head>
 <body>
+  <a class="skip-link" href="#mainMap">تجاوز إلى الخريطة</a>
   <header class="app-header">
-    <div class="brand-wrap">
-      <div class="salima-logo" aria-label="سليمة">
-        <span>سليمة</span>
-        <i></i>
-      </div>
-      <div>
-        <h1>مخطط مسارات التوزيع</h1>
-        <p>نسخة تجريبية مستقلة لإدارة مواقع الزبائن واختيار أفضل مسار</p>
-      </div>
-    </div>
-    <div class="header-actions">
-      <button id="exportBtn" class="btn btn-soft">تصدير البيانات</button>
-      <label class="btn btn-soft file-btn">استيراد البيانات<input id="importInput" type="file" accept="application/json" /></label>
-      <button id="demoBtn" class="btn btn-gold">بيانات تجريبية</button>
-    </div>
+    <div class="brand-wrap"><div class="salima-logo" aria-label="سليمة"><span>سليمة</span><i></i></div><div><h1>مخطط مسارات التوزيع</h1><p>تخطيط واضح، أسرع، ويحفظ بياناتك على جهازك</p></div></div>
+    <div class="header-status"><span id="serviceStatus" class="service-status checking"><i></i> جاري فحص خدمة الطرق</span><button id="helpBtn" class="icon-btn" aria-label="المساعدة" title="المساعدة">؟</button><button id="themeBtn" class="icon-btn" aria-label="تبديل الوضع الليلي" title="الوضع الليلي">◐</button></div>
   </header>
-
-  <main class="layout">
-    <aside class="sidebar">
-      <section class="card">
-        <div class="section-heading">
-          <div>
-            <span class="eyebrow">الخطوة 1</span>
-            <h2>إضافة زبون</h2>
-          </div>
-          <span id="locationStatus" class="status-chip">لم يتم تحديد موقع</span>
-        </div>
-
-        <label class="field">
-          <span>اسم الزبون / المحل</span>
-          <input id="customerName" type="text" placeholder="مثال: سوبر ماركت النور" autocomplete="off" />
-        </label>
-
-        <div class="location-actions">
-          <button id="currentLocationBtn" class="btn btn-primary">📍 استخدام موقعي الحالي</button>
-          <button id="pickMapBtn" class="btn btn-outline">🗺️ اختيار من الخريطة</button>
-        </div>
-
-        <div class="coords-box">
-          <div><span>Latitude</span><strong id="latValue">—</strong></div>
-          <div><span>Longitude</span><strong id="lngValue">—</strong></div>
-          <div><span>الدقة</span><strong id="accuracyValue">—</strong></div>
-        </div>
-
-        <button id="saveCustomerBtn" class="btn btn-gold full">حفظ الزبون</button>
-      </section>
-
-      <section class="card">
-        <div class="section-heading compact">
-          <div>
-            <span class="eyebrow">الخطوة 2</span>
-            <h2>نقطة الانطلاق</h2>
-          </div>
-        </div>
-        <p class="muted">يمكن أن تكون المستودع أو موقع السيارة الحالي.</p>
-        <div class="location-actions">
-          <button id="depotCurrentBtn" class="btn btn-primary">موقعي كنقطة بداية</button>
-          <button id="depotMapBtn" class="btn btn-outline">حددها من الخريطة</button>
-        </div>
-        <div id="depotSummary" class="mini-summary">لم يتم تحديد نقطة انطلاق بعد.</div>
-      </section>
-
-      <section class="card">
-        <div class="section-heading compact">
-          <div>
-            <span class="eyebrow">الخطوة 3</span>
-            <h2>طلبات اليوم</h2>
-          </div>
-          <strong id="selectedCount">0 محدد</strong>
-        </div>
-
-        <div class="toolbar">
-          <button id="selectAllBtn" class="link-btn">تحديد الكل</button>
-          <button id="clearSelectionBtn" class="link-btn">إلغاء التحديد</button>
-          <button id="deleteSelectedBtn" class="link-btn danger">حذف المحدد</button>
-        </div>
-
-        <div id="customerList" class="customer-list">
-          <div class="empty-state">أضف أول زبون للبدء.</div>
-        </div>
-      </section>
-
-      <section class="card route-settings">
-        <div class="section-heading compact">
-          <div>
-            <span class="eyebrow">إعدادات السيارة</span>
-            <h2>حساب الوقود</h2>
-          </div>
-        </div>
-        <div class="split-fields">
-          <label class="field"><span>استهلاك السيارة</span><input id="consumptionInput" type="number" min="1" max="40" step="0.1" value="9.5" /></label>
-          <label class="field"><span>الوحدة</span><select id="fuelUnit"><option value="L">لتر / 100 كم</option></select></label>
-        </div>
-        <label class="check-row"><input id="returnDepot" type="checkbox" checked /> العودة لنقطة الانطلاق بعد آخر زبون</label>
-        <button id="optimizeBtn" class="btn btn-gold full big">✨ حساب أفضل المسارات</button>
-        <p class="small-note">نسخة الاختبار مهيأة لعدد صغير/متوسط من النقاط. التشغيل التجاري الكبير يحتاج خدمة Routing مخصصة.</p>
-      </section>
-    </aside>
-
-    <section class="workspace">
-      <div class="map-shell">
-        <div id="map"></div>
-        <div class="map-overlay top-left">
-          <span class="live-dot"></span>
-          <span id="mapModeText">الوضع العادي</span>
-        </div>
-        <div class="map-overlay bottom-left map-help">انقر على الخريطة عندما يكون وضع الاختيار مفعلاً</div>
+  <main class="dashboard">
+    <aside id="controlPanel" class="control-panel collapsed">
+      <button id="panelHandle" class="sheet-handle" aria-label="فتح أو إغلاق لوحة التحكم" aria-expanded="false"><span></span></button>
+      <div class="panel-scroll">
+        <section class="panel-card">
+          <div class="section-title"><div><span class="eyebrow">الخطوة 1</span><h2 id="formTitle">إضافة زبون</h2></div><span id="locationStatus" class="badge">لم يحدد موقع</span></div>
+          <label class="field"><span>اسم الزبون / المحل</span><input id="customerName" maxlength="80" autocomplete="off" placeholder="مثال: متجر تجريبي"></label>
+          <label class="check-row order-toggle"><input id="hasOrder" type="checkbox" checked><span>لديه طلبية اليوم</span></label>
+          <div class="primary-actions"><button id="gpsCustomerBtn" class="btn primary"><span>⌖</span> استخدام موقعي الحالي</button><button id="pickCustomerBtn" class="btn secondary"><span>⌖</span> اختيار من الخريطة</button></div>
+          <details class="advanced"><summary>إدخال إحداثيات يدوياً</summary><div class="split-fields"><label class="field"><span>Latitude</span><input id="manualLat" type="number" step="any" inputmode="decimal"></label><label class="field"><span>Longitude</span><input id="manualLng" type="number" step="any" inputmode="decimal"></label></div><button id="applyCoordsBtn" class="btn secondary full">اعتماد الإحداثيات</button></details>
+          <div class="coords-box"><div><span>Latitude</span><strong id="latValue">—</strong></div><div><span>Longitude</span><strong id="lngValue">—</strong></div><div><span>الدقة</span><strong id="accuracyValue">—</strong></div></div>
+          <button id="clearPendingBtn" class="text-btn hidden">إلغاء تحديد الموقع</button>
+          <div class="form-actions"><button id="saveCustomerBtn" class="btn gold full">حفظ الزبون</button><button id="cancelEditBtn" class="btn secondary full hidden">إلغاء التعديل</button></div>
+        </section>
+        <section class="panel-card compact"><div class="section-title"><div><span class="eyebrow">الخطوة 2</span><h2>المستودع</h2></div></div><div class="primary-actions"><button id="gpsWarehouseBtn" class="btn primary">موقعي الحالي</button><button id="pickWarehouseBtn" class="btn secondary">تحديد من الخريطة</button></div><div id="warehouseSummary" class="mini-summary">لم تحدد نقطة البداية بعد.</div></section>
+        <section class="panel-card">
+          <div class="section-title"><div><span class="eyebrow">الخطوة 3</span><h2>زبائن الرحلة</h2></div><strong id="selectedCount">0 محدد</strong></div>
+          <label class="search-field"><span aria-hidden="true">⌕</span><input id="customerSearch" type="search" placeholder="بحث في الزبائن" aria-label="بحث في الزبائن"></label>
+          <div id="customerFilters" class="filter-tabs" role="group" aria-label="فلترة الزبائن"><button class="active" data-filter="all">الكل</button><button data-filter="orders">لديهم طلبيات</button><button data-filter="no-orders">بلا طلبيات</button></div>
+          <div class="list-tools"><button id="selectAllBtn" class="text-btn">تحديد الكل</button><button id="clearSelectionBtn" class="text-btn">إلغاء الكل</button><button id="deleteSelectedBtn" class="text-btn danger">حذف المحدد</button></div>
+          <div id="customerList" class="customer-list"></div>
+        </section>
+        <section class="panel-card"><div class="section-title"><div><span class="eyebrow">إعدادات المركبة</span><h2>الوقود والرحلة</h2></div></div><div class="split-fields"><label class="field"><span>لتر / 100 كم</span><input id="consumptionInput" type="number" min="1" max="40" step=".1"></label><label class="field"><span>سعر اللتر</span><input id="fuelPriceInput" type="number" min="0" step=".01" placeholder="اختياري"></label></div><label class="check-row"><input id="returnWarehouse" type="checkbox"><span>العودة إلى المستودع</span></label><button id="optimizeBtn" class="btn gold big full">✦ حساب أفضل المسارات</button><p class="privacy-note">بيانات الزبائن محفوظة على هذا الجهاز فقط في النسخة التجريبية، ولا يتم إرسالها إلى GitHub.</p></section>
+        <section class="panel-card data-tools"><button id="exportBtn" class="btn secondary">تصدير JSON</button><label class="btn secondary file-btn">استيراد JSON<input id="importInput" type="file" accept="application/json"></label><button id="demoBtn" class="btn secondary">بيانات تجريبية</button><button id="deleteAllBtn" class="btn danger-outline">حذف جميع البيانات</button></section>
       </div>
-
-      <section class="results-card">
-        <div class="results-header">
-          <div>
-            <span class="eyebrow">نتيجة التحليل</span>
-            <h2>مقارنة المسارات</h2>
-          </div>
-          <div id="routeEngineBadge" class="engine-badge">لم يتم الحساب</div>
-        </div>
-
-        <div id="routeCards" class="route-cards">
-          <div class="result-empty">
-            <div class="result-icon">↗</div>
-            <h3>المسارات ستظهر هنا</h3>
-            <p>حدد نقطة البداية، اختر زبونين على الأقل، ثم اضغط حساب أفضل المسارات.</p>
-          </div>
-        </div>
-
-        <div id="routeDetails" class="route-details hidden">
-          <div class="route-details-head">
-            <h3 id="routeTitle">تفاصيل المسار</h3>
-            <button id="fitRouteBtn" class="btn btn-soft">عرض كامل على الخريطة</button>
-          </div>
-          <ol id="routeStops"></ol>
-        </div>
-      </section>
+    </aside>
+    <section class="map-workspace">
+      <nav class="map-toolbar" aria-label="أدوات الخريطة"><div id="styleSwitcher" class="style-switcher"><button data-style="liberty" class="active">Liberty</button><button data-style="positron">Positron</button><button data-style="dark">Dark</button></div><button id="fitCustomersBtn" class="btn secondary">إظهار الجميع</button><button id="clearRouteBtn" class="btn secondary">مسح المسار</button></nav>
+      <div id="mainMap" class="map-shell" tabindex="-1"><div id="map"></div><div id="mapSkeleton" class="map-skeleton"><i></i><strong>جاري تحميل الخريطة…</strong></div><div id="mapMessage" class="map-message hidden"></div><span id="mapMode" class="map-mode">الوضع العادي</span></div>
+      <section class="results-panel"><div class="results-heading"><div><span class="eyebrow">نتيجة التحليل</span><h2>مقارنة المسارات</h2></div><span id="engineBadge" class="badge">لم يتم الحساب</span></div><div id="routeCards" class="route-cards"></div><div id="routeDetails" class="route-details hidden"><div class="details-head"><h3 data-route-title>تفاصيل المسار</h3><button id="fitRouteBtn" class="btn secondary">عرض كامل</button></div><div class="endpoint-grid"><p>البداية: <strong data-route-start>—</strong></p><p>النهاية: <strong data-route-end>—</strong></p></div><ol data-route-stops></ol><p class="fuel-disclaimer">تقدير حسب متوسط استهلاك السيارة، وليس قياساً فعلياً.</p></div></section>
     </section>
   </main>
-
-  <div id="toast" class="toast" role="status" aria-live="polite"></div>
-
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="js/routing.js"></script>
-  <script src="js/app.js"></script>
+  <section id="onboarding" class="onboarding hidden" role="dialog" aria-modal="true" aria-labelledby="onboardingTitle"><div><span class="welcome-icon">↗</span><h2 id="onboardingTitle">مرحباً بك في Salima Routes</h2><p>حدد المستودع، أضف الزبائن من GPS أو الخريطة، ثم قارن أفضل مسارات التوزيع.</p><button id="startBtn" class="btn gold">ابدأ الآن</button></div></section>
+  <dialog id="confirmDialog" class="dialog"><h2 data-dialog-title></h2><p data-dialog-message></p><div><button data-dialog-cancel class="btn secondary">إلغاء</button><button data-dialog-confirm class="btn primary">تأكيد</button></div></dialog>
+  <dialog id="helpDialog" class="dialog"><h2>طريقة الاستخدام</h2><ol><li>حدد المستودع.</li><li>أضف الزبائن وحدد أصحاب الطلبيات.</li><li>اضغط حساب أفضل المسارات.</li></ol><p>خدمة OSRM العامة مخصصة للتجربة وليست للاستخدام التجاري المكثف.</p><button id="closeHelpBtn" class="btn primary">فهمت</button></dialog>
+  <div id="toastRegion" class="toast-region" aria-live="polite"></div>
+  <script src="https://unpkg.com/maplibre-gl@5.6.2/dist/maplibre-gl.js" crossorigin="anonymous"></script>
+  <script type="module" src="./js/app.js"></script>
 </body>
 </html>

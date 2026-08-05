@@ -1,425 +1,205 @@
-(function () {
-  const STORAGE_KEY = 'salima_routes_customers_v1';
-  const DEPOT_KEY = 'salima_routes_depot_v1';
-  const SETTINGS_KEY = 'salima_routes_settings_v1';
-  const DEFAULT_CENTER = [32.310, 35.030]; // Tulkarm area fallback
+import { APP_CONFIG } from './config.js';
+import { StorageManager } from './data/storage.js';
+import { normalizeCustomer } from './data/migration.js';
+import { importState, exportState, downloadJson } from './data/import-export.js';
+import { upsertCustomer, removeCustomer } from './data/customer-store.js';
+import { validCoordinates, validateCustomerName } from './utils/validation.js';
+import { OsrmProvider } from './routing/osrm-provider.js';
+import { MapManager } from './map/map-manager.js';
+import { MarkerManager } from './map/marker-manager.js';
+import { RouteRenderer } from './map/route-renderer.js';
+import { Toasts } from './ui/toasts.js';
+import { Dialogs } from './ui/dialogs.js';
+import { CustomerList } from './ui/customer-list.js';
+import { RouteResults } from './ui/route-results.js';
 
-  const state = {
-    customers: loadJSON(STORAGE_KEY, []),
-    depot: loadJSON(DEPOT_KEY, null),
-    pendingLocation: null,
-    selectedIds: new Set(),
-    mapMode: 'normal',
-    markers: new Map(),
-    depotMarker: null,
-    pendingMarker: null,
-    routeLayer: null,
-    routeStopLayers: [],
-    routeResults: [],
-    activeRouteId: null
-  };
+const storage = new StorageManager();
+let state = storage.load();
+const selected = new Set();
+const routing = new OsrmProvider();
+const elements = Object.fromEntries([...document.querySelectorAll('[id]')].map(element => [element.id, element]));
+const toasts = new Toasts(elements.toastRegion);
+const dialogs = new Dialogs(elements.confirmDialog);
+let mapManager, markers, routeRenderer, pendingLocation = null, editingId = null, mapMode = 'normal', activeRoutes = [], routeCustomers = [], calculationInProgress = false;
 
-  const els = {};
-  const $ = id => document.getElementById(id);
+const customerList = new CustomerList(elements.customerList, elements.selectedCount, elements.customerSearch, elements.customerFilters, { toggle: toggleCustomer, edit: editCustomer, delete: deleteCustomer });
+const routeResults = new RouteResults(elements.routeCards, elements.routeDetails, { select: id => selectRoute(activeRoutes.find(route => route.id === id)) });
 
-  document.addEventListener('DOMContentLoaded', init);
+init();
 
-  function init() {
-    Object.assign(els, {
-      customerName: $('customerName'), locationStatus: $('locationStatus'), latValue: $('latValue'), lngValue: $('lngValue'), accuracyValue: $('accuracyValue'),
-      currentLocationBtn: $('currentLocationBtn'), pickMapBtn: $('pickMapBtn'), saveCustomerBtn: $('saveCustomerBtn'),
-      depotCurrentBtn: $('depotCurrentBtn'), depotMapBtn: $('depotMapBtn'), depotSummary: $('depotSummary'),
-      customerList: $('customerList'), selectedCount: $('selectedCount'), selectAllBtn: $('selectAllBtn'), clearSelectionBtn: $('clearSelectionBtn'), deleteSelectedBtn: $('deleteSelectedBtn'),
-      consumptionInput: $('consumptionInput'), returnDepot: $('returnDepot'), optimizeBtn: $('optimizeBtn'), routeCards: $('routeCards'), routeDetails: $('routeDetails'), routeTitle: $('routeTitle'), routeStops: $('routeStops'), routeEngineBadge: $('routeEngineBadge'), fitRouteBtn: $('fitRouteBtn'),
-      mapModeText: $('mapModeText'), exportBtn: $('exportBtn'), importInput: $('importInput'), demoBtn: $('demoBtn'), toast: $('toast')
-    });
+async function init() {
+  applyPreferences();
+  bindEvents();
+  syncSettings();
+  renderAll();
+  routeResults.empty();
+  initMap();
+  if (state.storageWarning) showStorageWarning();
+  if (!state.uiPreferences.onboardingSeen) openOnboarding();
+  checkRoutingHealth();
+  registerServiceWorker();
+}
 
-    const settings = loadJSON(SETTINGS_KEY, { consumption: 9.5, returnDepot: true });
-    els.consumptionInput.value = settings.consumption || 9.5;
-    els.returnDepot.checked = settings.returnDepot !== false;
+function initMap() {
+  if (!globalThis.maplibregl) { showMapError('تعذر تحميل MapLibre. تحقق من الاتصال ثم أعد المحاولة.'); return; }
+  try {
+    mapManager = new MapManager('map', state.uiPreferences, handleMapClick).init();
+    mapManager.onReady = () => { elements.mapSkeleton.classList.add('hidden'); markers = new MarkerManager(mapManager.map, { isSelected: id => selected.has(id), toggle: toggleCustomer, edit: editCustomer, delete: deleteCustomer }); routeRenderer = new RouteRenderer(mapManager.map); renderMarkers(); };
+    mapManager.map.on('error', event => { if (!mapManager.loaded) showMapError('تعذر تحميل نمط الخريطة. تحقق من الاتصال بالإنترنت.'); if (event?.error) console.warn('Map style resource error:', event.error.message); });
+  } catch { showMapError('تعذر بدء الخريطة في هذا المتصفح.'); }
+}
 
-    initMap();
-    bindEvents();
-    renderCustomers();
-    renderDepot();
-    updateMapMarkers();
-  }
+function bindEvents() {
+  elements.gpsCustomerBtn.addEventListener('click', () => locate('customer'));
+  elements.gpsWarehouseBtn.addEventListener('click', () => locate('warehouse'));
+  elements.pickCustomerBtn.addEventListener('click', () => setMapMode(mapMode === 'customer' ? 'normal' : 'customer'));
+  elements.pickWarehouseBtn.addEventListener('click', () => setMapMode(mapMode === 'warehouse' ? 'normal' : 'warehouse'));
+  elements.applyCoordsBtn.addEventListener('click', applyManualCoordinates);
+  elements.clearPendingBtn.addEventListener('click', clearPending);
+  elements.saveCustomerBtn.addEventListener('click', saveCustomer);
+  elements.cancelEditBtn.addEventListener('click', resetForm);
+  elements.selectAllBtn.addEventListener('click', () => { state.customers.filter(customer => customer.hasOrder).forEach(customer => selected.add(customer.id)); renderAll(); });
+  elements.clearSelectionBtn.addEventListener('click', () => { selected.clear(); renderAll(); });
+  elements.deleteSelectedBtn.addEventListener('click', deleteSelected);
+  elements.optimizeBtn.addEventListener('click', calculateRoutes);
+  elements.clearRouteBtn.addEventListener('click', clearRoute);
+  elements.fitCustomersBtn.addEventListener('click', fitCustomers);
+  elements.fitRouteBtn.addEventListener('click', () => routeRenderer?.fit());
+  elements.styleSwitcher.addEventListener('click', event => { const button = event.target.closest('[data-style]'); if (button) setMapStyle(button.dataset.style); });
+  elements.themeBtn.addEventListener('click', toggleTheme);
+  elements.helpBtn.addEventListener('click', () => elements.helpDialog.showModal());
+  elements.closeHelpBtn.addEventListener('click', () => elements.helpDialog.close());
+  elements.panelHandle.addEventListener('click', togglePanel);
+  elements.startBtn.addEventListener('click', closeOnboarding);
+  elements.demoBtn.addEventListener('click', loadDemoData);
+  elements.exportBtn.addEventListener('click', exportData);
+  elements.importInput.addEventListener('change', importData);
+  elements.deleteAllBtn.addEventListener('click', deleteAllData);
+  elements.consumptionInput.addEventListener('change', saveVehicleSettings);
+  elements.fuelPriceInput.addEventListener('change', saveVehicleSettings);
+  elements.returnWarehouse.addEventListener('change', saveVehicleSettings);
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') { setMapMode('normal'); if (elements.onboarding.classList.contains('hidden') === false) closeOnboarding(); } });
+}
 
-  function initMap() {
-    state.map = L.map('map', { zoomControl: true }).setView(DEFAULT_CENTER, 13);
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '&copy; OpenStreetMap contributors'
-    }).addTo(state.map);
+function handleMapClick(location) {
+  if (mapMode === 'customer') { setPending(location); toasts.show('تم تحديد موقع الزبون. يمكنك تغييره بالنقر مرة أخرى.'); }
+  if (mapMode === 'warehouse') { setWarehouse(location); setMapMode('normal'); toasts.show('تم تحديد المستودع.'); }
+}
 
-    state.map.on('click', (e) => {
-      if (state.mapMode === 'pick-customer') {
-        setPendingLocation({ lat: e.latlng.lat, lng: e.latlng.lng, accuracy: null, source: 'map' });
-        setMapMode('normal');
-        toast('تم تحديد موقع الزبون من الخريطة');
-      } else if (state.mapMode === 'pick-depot') {
-        setDepot({ lat: e.latlng.lat, lng: e.latlng.lng, accuracy: null, source: 'map' });
-        setMapMode('normal');
-        toast('تم تحديد نقطة الانطلاق');
-      }
-    });
+function setMapMode(mode) {
+  mapMode = mode;
+  elements.mapMode.textContent = mode === 'customer' ? 'انقر لتحديد موقع الزبون' : mode === 'warehouse' ? 'انقر لتحديد المستودع' : 'الوضع العادي';
+  elements.mapMode.classList.toggle('active', mode !== 'normal');
+  elements.pickCustomerBtn.classList.toggle('active', mode === 'customer');
+  elements.pickWarehouseBtn.classList.toggle('active', mode === 'warehouse');
+}
 
-    setTimeout(() => state.map.invalidateSize(), 200);
-  }
+function locate(target) {
+  if (!navigator.geolocation) { toasts.show('المتصفح لا يدعم GPS.', 'error'); return; }
+  const button = target === 'customer' ? elements.gpsCustomerBtn : elements.gpsWarehouseBtn;
+  setButtonLoading(button, true, 'جاري تحديد الموقع…');
+  navigator.geolocation.getCurrentPosition(position => {
+    const { latitude, longitude, accuracy } = position.coords;
+    if (!validCoordinates(latitude, longitude)) { toasts.show('أعاد GPS إحداثيات غير صالحة.', 'error'); return; }
+    const location = { latitude, longitude, accuracy, source: 'current-location' };
+    if (target === 'customer') setPending(location); else setWarehouse(location);
+    mapManager?.map.easeTo({ center: [longitude, latitude], zoom: 16, duration: reducedMotion() ? 0 : 650 });
+    if (accuracy > APP_CONFIG.poorAccuracyMeters) toasts.show(`دقة GPS ضعيفة (±${Math.round(accuracy)}م). يمكنك تصحيح الموقع على الخريطة.`, 'warning');
+    setButtonLoading(button, false);
+  }, error => {
+    const message = error.code === 1 ? 'تم رفض صلاحية الموقع. اختر الموقع من الخريطة.' : error.code === 3 ? 'انتهت مهلة GPS. حاول في مكان مفتوح.' : 'تعذر الوصول إلى GPS.';
+    toasts.show(message, 'error'); setButtonLoading(button, false);
+  }, { enableHighAccuracy: true, timeout: 12_000, maximumAge: 0 });
+}
 
-  function bindEvents() {
-    els.currentLocationBtn.addEventListener('click', () => getCurrentPosition('customer'));
-    els.pickMapBtn.addEventListener('click', () => setMapMode(state.mapMode === 'pick-customer' ? 'normal' : 'pick-customer'));
-    els.saveCustomerBtn.addEventListener('click', saveCustomer);
-    els.customerName.addEventListener('keydown', e => { if (e.key === 'Enter') saveCustomer(); });
+function applyManualCoordinates() {
+  const latitude = Number(elements.manualLat.value), longitude = Number(elements.manualLng.value);
+  if (!validCoordinates(latitude, longitude)) { toasts.show('أدخل إحداثيات صالحة.', 'error'); return; }
+  setPending({ latitude, longitude, accuracy: null, source: 'manual' });
+  mapManager?.map.easeTo({ center: [longitude, latitude], zoom: 16, duration: reducedMotion() ? 0 : 650 });
+}
 
-    els.depotCurrentBtn.addEventListener('click', () => getCurrentPosition('depot'));
-    els.depotMapBtn.addEventListener('click', () => setMapMode(state.mapMode === 'pick-depot' ? 'normal' : 'pick-depot'));
+function setPending(location) {
+  pendingLocation = { ...location, latitude: Number(location.latitude), longitude: Number(location.longitude) };
+  elements.latValue.textContent = pendingLocation.latitude.toFixed(6);
+  elements.lngValue.textContent = pendingLocation.longitude.toFixed(6);
+  elements.accuracyValue.textContent = Number.isFinite(pendingLocation.accuracy) ? `±${Math.round(pendingLocation.accuracy)} م` : 'يدوي/خريطة';
+  elements.locationStatus.textContent = 'الموقع جاهز';
+  elements.locationStatus.classList.add('success');
+  elements.clearPendingBtn.classList.remove('hidden');
+  const marker = markers?.setPending(pendingLocation);
+  marker?.on('dragend', () => { const point = marker.getLngLat(); setPending({ latitude: point.lat, longitude: point.lng, source: 'map-click', accuracy: null }); });
+}
 
-    els.selectAllBtn.addEventListener('click', () => { state.customers.forEach(c => state.selectedIds.add(c.id)); renderCustomers(); });
-    els.clearSelectionBtn.addEventListener('click', () => { state.selectedIds.clear(); renderCustomers(); });
-    els.deleteSelectedBtn.addEventListener('click', deleteSelected);
+function clearPending() { pendingLocation = null; markers?.setPending(null); elements.latValue.textContent = elements.lngValue.textContent = elements.accuracyValue.textContent = '—'; elements.locationStatus.textContent = 'لم يحدد موقع'; elements.locationStatus.classList.remove('success'); elements.clearPendingBtn.classList.add('hidden'); }
 
-    els.optimizeBtn.addEventListener('click', optimizeRoutes);
-    els.fitRouteBtn.addEventListener('click', fitActiveRoute);
-    els.consumptionInput.addEventListener('change', saveSettings);
-    els.returnDepot.addEventListener('change', saveSettings);
+function saveCustomer() {
+  const validation = validateCustomerName(elements.customerName.value, state.customers, editingId);
+  if (!validation.valid) { toasts.show(validation.error, validation.duplicate ? 'warning' : 'error'); elements.customerName.focus(); return; }
+  if (!pendingLocation || !validCoordinates(pendingLocation.latitude, pendingLocation.longitude)) { toasts.show('حدد موقع الزبون أولاً.', 'error'); return; }
+  const previous = state.customers.find(customer => customer.id === editingId);
+  const result = upsertCustomer(state.customers, { ...pendingLocation, name: validation.value, hasOrder: elements.hasOrder.checked }, editingId);
+  const customer = result.customer; state.customers = result.customers;
+  selected.add(customer.id); saveState(); resetForm(); renderAll(customer.id); toasts.show(previous ? 'تم تحديث بيانات الزبون.' : 'تم حفظ الزبون بنجاح.', 'success');
+}
 
-    els.exportBtn.addEventListener('click', exportData);
-    els.importInput.addEventListener('change', importData);
-    els.demoBtn.addEventListener('click', loadDemoData);
-  }
+function editCustomer(id) { const customer = state.customers.find(item => item.id === id); if (!customer) return; editingId = id; elements.formTitle.textContent = 'تعديل الزبون'; elements.customerName.value = customer.name; elements.hasOrder.checked = customer.hasOrder; elements.saveCustomerBtn.textContent = 'حفظ التعديلات'; elements.cancelEditBtn.classList.remove('hidden'); setPending(customer); elements.controlPanel.scrollTo({ top: 0, behavior: reducedMotion() ? 'auto' : 'smooth' }); }
+function resetForm() { editingId = null; elements.formTitle.textContent = 'إضافة زبون'; elements.customerName.value = ''; elements.hasOrder.checked = true; elements.manualLat.value = elements.manualLng.value = ''; elements.saveCustomerBtn.textContent = 'حفظ الزبون'; elements.cancelEditBtn.classList.add('hidden'); clearPending(); setMapMode('normal'); }
+function toggleCustomer(id) { selected.has(id) ? selected.delete(id) : selected.add(id); renderAll(); }
+async function deleteCustomer(id) { const customer = state.customers.find(item => item.id === id); if (!customer || !await dialogs.confirm({ title: 'حذف الزبون؟', message: `سيتم حذف ${customer.name} من هذا الجهاز.`, confirmLabel: 'حذف', danger: true })) return; state.customers = removeCustomer(state.customers, id); selected.delete(id); saveState(); renderAll(); clearRoute(); toasts.show('تم حذف الزبون.'); }
+async function deleteSelected() { if (!selected.size) return toasts.show('لا يوجد زبائن محددون.', 'warning'); if (!await dialogs.confirm({ title: 'حذف الزبائن المحددين؟', message: `سيتم حذف ${selected.size} زبوناً من هذا الجهاز.`, confirmLabel: 'حذف المحدد', danger: true })) return; state.customers = state.customers.filter(customer => !selected.has(customer.id)); selected.clear(); saveState(); renderAll(); clearRoute(); }
 
-  function getCurrentPosition(target) {
-    if (!navigator.geolocation) {
-      toast('المتصفح لا يدعم تحديد الموقع', true);
-      return;
-    }
-    const button = target === 'customer' ? els.currentLocationBtn : els.depotCurrentBtn;
-    const oldText = button.textContent;
-    button.disabled = true;
-    button.textContent = 'جاري تحديد الموقع…';
-    navigator.geolocation.getCurrentPosition(
-      pos => {
-        const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy, source: 'gps' };
-        if (target === 'customer') setPendingLocation(loc); else setDepot(loc);
-        state.map.setView([loc.lat, loc.lng], 16);
-        toast(target === 'customer' ? 'تم تحديد موقع الزبون الحالي' : 'تم اعتماد موقعك كنقطة انطلاق');
-        button.disabled = false; button.textContent = oldText;
-      },
-      err => {
-        button.disabled = false; button.textContent = oldText;
-        const msg = err.code === 1 ? 'تم رفض صلاحية الموقع. يمكنك اختيار الموقع من الخريطة.' : 'تعذر تحديد الموقع. جرّب اختيار الموقع من الخريطة.';
-        toast(msg, true);
-      },
-      { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
-    );
-  }
+function setWarehouse(location) { state.warehouse = { latitude: Number(location.latitude), longitude: Number(location.longitude), accuracy: Number.isFinite(Number(location.accuracy)) ? Number(location.accuracy) : null, source: location.source || 'map-click', updatedAt: new Date().toISOString() }; saveState(); renderAll(); }
 
-  function setPendingLocation(loc) {
-    state.pendingLocation = loc;
-    els.latValue.textContent = loc.lat.toFixed(6);
-    els.lngValue.textContent = loc.lng.toFixed(6);
-    els.accuracyValue.textContent = loc.accuracy ? `± ${Math.round(loc.accuracy)} م` : 'من الخريطة';
-    els.locationStatus.textContent = 'تم تحديد الموقع';
-    els.locationStatus.classList.add('ok');
+async function calculateRoutes() {
+  if (calculationInProgress) return;
+  if (!state.warehouse) return toasts.show('حدد المستودع أولاً.', 'error');
+  routeCustomers = state.customers.filter(customer => selected.has(customer.id));
+  if (routeCustomers.length < 2) return toasts.show('حدد زبونين على الأقل.', 'error');
+  if (routeCustomers.length > APP_CONFIG.maxCustomersPerRoute) return toasts.show('النسخة التجريبية تسمح حتى 20 زبوناً في العملية الواحدة.', 'error');
+  calculationInProgress = true; setButtonLoading(elements.optimizeBtn, true, 'جاري حساب المسارات…'); routeResults.loading();
+  try {
+    const points = [state.warehouse, ...routeCustomers];
+    const result = await routing.optimizeRoute(points, { consumption: state.vehicleSettings.consumptionPer100Km, returnToWarehouse: state.routePreferences.returnToWarehouse });
+    activeRoutes = result.alternatives; routeResults.render(activeRoutes, Number(state.vehicleSettings.fuelPrice)); elements.engineBadge.textContent = result.fallback ? 'حساب تقديري' : 'طرق قيادة فعلية'; elements.engineBadge.classList.toggle('warning', result.fallback); await selectRoute(activeRoutes.find(route => route.id === 'balanced'));
+    if (result.fallback) toasts.show('مسار تقديري مؤقت — خدمة الطرق غير متاحة.', 'warning');
+  } catch { routeResults.empty(); toasts.show('تعذر حساب المسار حالياً. حاول لاحقاً.', 'error'); }
+  finally { calculationInProgress = false; setButtonLoading(elements.optimizeBtn, false); }
+}
 
-    if (state.pendingMarker) state.map.removeLayer(state.pendingMarker);
-    state.pendingMarker = L.circleMarker([loc.lat, loc.lng], { radius: 10, weight: 3, fillOpacity: .25 }).addTo(state.map)
-      .bindTooltip('الموقع المختار مؤقتاً');
-  }
+async function selectRoute(route) {
+  if (!route) return;
+  routeResults.select(route, routeCustomers, state.warehouse); renderMarkers(null, route.order);
+  const orderedPoints = route.order.map(index => index === 0 ? state.warehouse : routeCustomers[index - 1]);
+  try { const realRoute = await routing.getRoute(orderedPoints); routeRenderer?.draw(realRoute.geometry, false); }
+  catch { const geometry = { type: 'LineString', coordinates: orderedPoints.map(point => [point.longitude, point.latitude]) }; routeRenderer?.draw(geometry, true); elements.engineBadge.textContent = 'مسار تقديري'; toasts.show('مسار تقديري مؤقت — خدمة الطرق غير متاحة.', 'warning'); }
+}
 
-  function saveCustomer() {
-    const name = els.customerName.value.trim();
-    if (!name) return toast('اكتب اسم الزبون أولاً', true);
-    if (!state.pendingLocation) return toast('حدد موقع الزبون أولاً', true);
+function clearRoute() { routing.abort(); activeRoutes = []; routeCustomers = []; routeRenderer?.clear(); routeResults.empty(); elements.engineBadge.textContent = 'لم يتم الحساب'; renderMarkers(); }
+function fitCustomers() { const points = [...state.customers, ...(state.warehouse ? [state.warehouse] : [])]; mapManager?.fitPoints(points); }
+function renderAll(addedId = null) { customerList.render(state.customers, selected); elements.warehouseSummary.textContent = state.warehouse ? `${state.warehouse.latitude.toFixed(6)}, ${state.warehouse.longitude.toFixed(6)} • جاهز` : 'لم تحدد نقطة البداية بعد.'; renderMarkers(addedId); }
+function renderMarkers(addedId = null, order = []) { markers?.render(state.customers, state.warehouse, order, addedId); }
 
-    const customer = {
-      id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
-      name,
-      lat: state.pendingLocation.lat,
-      lng: state.pendingLocation.lng,
-      accuracy: state.pendingLocation.accuracy,
-      source: state.pendingLocation.source,
-      createdAt: new Date().toISOString()
-    };
-    state.customers.push(customer);
-    persistCustomers();
-    state.selectedIds.add(customer.id);
-    els.customerName.value = '';
-    clearPendingLocation();
-    renderCustomers();
-    updateMapMarkers();
-    toast(`تم حفظ ${name}`);
-  }
+function syncSettings() { elements.consumptionInput.value = state.vehicleSettings.consumptionPer100Km; elements.fuelPriceInput.value = state.vehicleSettings.fuelPrice ?? ''; elements.returnWarehouse.checked = state.routePreferences.returnToWarehouse; }
+function saveVehicleSettings() { const consumption = Number(elements.consumptionInput.value); state.vehicleSettings.consumptionPer100Km = Number.isFinite(consumption) && consumption > 0 ? consumption : 9.5; state.vehicleSettings.fuelPrice = Number(elements.fuelPriceInput.value) || null; state.routePreferences.returnToWarehouse = elements.returnWarehouse.checked; saveState(); syncSettings(); }
+function saveState() { storage.save(state); }
 
-  function clearPendingLocation() {
-    state.pendingLocation = null;
-    els.latValue.textContent = '—'; els.lngValue.textContent = '—'; els.accuracyValue.textContent = '—';
-    els.locationStatus.textContent = 'لم يتم تحديد موقع'; els.locationStatus.classList.remove('ok');
-    if (state.pendingMarker) { state.map.removeLayer(state.pendingMarker); state.pendingMarker = null; }
-  }
+function exportData() { downloadJson(exportState(state), `salima-routes-${new Date().toISOString().slice(0, 10)}.json`); toasts.show('تم تجهيز ملف التصدير.', 'success'); }
+async function importData(event) { const [file] = event.target.files; try { const imported = await importState(file); if (!await dialogs.confirm({ title: 'استيراد البيانات؟', message: `سيتم استبدال العرض الحالي بملف يحتوي ${imported.customers.length} زبوناً. صدّر نسخة احتياطية أولاً إذا لزم.`, confirmLabel: 'استيراد' })) return; state = imported; selected.clear(); saveState(); syncSettings(); renderAll(); clearRoute(); toasts.show('تم استيراد البيانات بأمان.', 'success'); } catch (error) { toasts.show(error.message, 'error'); } finally { event.target.value = ''; } }
+async function deleteAllData() { if (!await dialogs.confirm({ title: 'حذف جميع البيانات نهائياً؟', message: 'سيتم حذف الزبائن والمستودع والإعدادات المحلية. لا يمكن التراجع إلا من ملف تصدير.', confirmLabel: 'نعم، احذف الكل', danger: true })) return; storage.reset(); state = storage.load(); selected.clear(); syncSettings(); renderAll(); clearRoute(); resetForm(); toasts.show('تم حذف البيانات المحلية.'); }
+function loadDemoData() { const base = Date.now(); state.customers = [['متجر تجريبي 1', 32.3117, 35.0272], ['متجر تجريبي 2', 32.3172, 35.0335], ['متجر تجريبي 3', 32.3057, 35.0390], ['متجر تجريبي 4', 32.3005, 35.0227]].map(([name, latitude, longitude], index) => normalizeCustomer({ id: `demo-${base}-${index}`, name, latitude, longitude, hasOrder: index !== 3, source: 'demo' })); state.warehouse = { latitude: 32.3104, longitude: 35.0285, source: 'demo', accuracy: null, updatedAt: new Date().toISOString() }; selected.clear(); state.customers.filter(customer => customer.hasOrder).forEach(customer => selected.add(customer.id)); saveState(); renderAll(); fitCustomers(); toasts.show('تم تحميل بيانات تجريبية فقط.', 'success'); }
 
-  function setDepot(loc) {
-    state.depot = { ...loc, updatedAt: new Date().toISOString() };
-    localStorage.setItem(DEPOT_KEY, JSON.stringify(state.depot));
-    renderDepot();
-    updateDepotMarker();
-  }
+function applyPreferences() { const systemDark = matchMedia('(prefers-color-scheme: dark)').matches; const theme = state.uiPreferences.theme || (systemDark ? 'dark' : 'light'); document.documentElement.dataset.theme = theme; elements.themeBtn?.setAttribute('aria-pressed', String(theme === 'dark')); }
+function toggleTheme() { const dark = document.documentElement.dataset.theme !== 'dark'; document.documentElement.dataset.theme = dark ? 'dark' : 'light'; state.uiPreferences.theme = dark ? 'dark' : 'light'; elements.themeBtn.setAttribute('aria-pressed', String(dark)); if (dark) setMapStyle('dark'); else if (state.uiPreferences.mapStyle === 'dark') setMapStyle('liberty'); saveState(); }
+function setMapStyle(style) { mapManager?.setStyle(style); state.uiPreferences.mapStyle = style; elements.styleSwitcher.querySelectorAll('[data-style]').forEach(button => button.classList.toggle('active', button.dataset.style === style)); saveState(); }
+function togglePanel() { const collapsed = elements.controlPanel.classList.toggle('collapsed'); elements.panelHandle.setAttribute('aria-expanded', String(!collapsed)); setTimeout(() => mapManager?.map.resize(), 300); }
+function openOnboarding() { elements.onboarding.classList.remove('hidden'); elements.startBtn.focus(); }
+function closeOnboarding() { elements.onboarding.classList.add('hidden'); state.uiPreferences.onboardingSeen = true; saveState(); elements.customerName.focus(); }
+async function showStorageWarning() { const download = await dialogs.confirm({ title: 'تعذر قراءة البيانات المحلية', message: 'احتفظ التطبيق بالنص التالف دون حذفه. هل تريد تنزيل نسخة منه قبل بدء بيانات جديدة؟', confirmLabel: 'تنزيل نسخة' }); if (download) storage.downloadCorruptBackup(); toasts.show('لم تُحذف البيانات التالفة تلقائياً.', 'warning'); }
+async function checkRoutingHealth() { const healthy = await routing.healthCheck(); elements.serviceStatus.className = `service-status ${healthy ? 'online' : 'offline'}`; elements.serviceStatus.innerHTML = `<i></i>${healthy ? ' خدمة الطرق متصلة' : ' الوضع التقديري متاح'}`; }
+function showMapError(message) { elements.mapSkeleton.classList.add('hidden'); elements.mapMessage.textContent = message; elements.mapMessage.classList.remove('hidden'); }
+function setButtonLoading(button, loading, label) { if (loading) { button.dataset.label = button.textContent; button.textContent = label; button.classList.add('loading'); button.disabled = true; } else { button.textContent = button.dataset.label || button.textContent; button.classList.remove('loading'); button.disabled = false; } }
+function reducedMotion() { return matchMedia('(prefers-reduced-motion: reduce)').matches; }
+function registerServiceWorker() { if ('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js').then(registration => { registration.addEventListener('updatefound', () => { const worker = registration.installing; worker?.addEventListener('statechange', () => { if (worker.state === 'installed' && navigator.serviceWorker.controller) toasts.show('يتوفر تحديث جديد. أعد تحميل الصفحة لتطبيقه.', 'info'); }); }); }).catch(() => {}); }
 
-  function renderDepot() {
-    if (!state.depot) { els.depotSummary.textContent = 'لم يتم تحديد نقطة انطلاق بعد.'; return; }
-    const accuracy = state.depot.accuracy ? ` • دقة ±${Math.round(state.depot.accuracy)}م` : '';
-    els.depotSummary.innerHTML = `<strong>نقطة البداية جاهزة</strong><br><span dir="ltr">${state.depot.lat.toFixed(6)}, ${state.depot.lng.toFixed(6)}</span>${accuracy}`;
-  }
-
-  function setMapMode(mode) {
-    state.mapMode = mode;
-    els.mapModeText.textContent = mode === 'pick-customer' ? 'انقر لتحديد موقع الزبون' : mode === 'pick-depot' ? 'انقر لتحديد نقطة الانطلاق' : 'الوضع العادي';
-    state.map.getContainer().style.cursor = mode === 'normal' ? '' : 'crosshair';
-    els.pickMapBtn.textContent = mode === 'pick-customer' ? 'إلغاء الاختيار' : '🗺️ اختيار من الخريطة';
-    els.depotMapBtn.textContent = mode === 'pick-depot' ? 'إلغاء الاختيار' : 'حددها من الخريطة';
-  }
-
-  function renderCustomers() {
-    els.customerList.innerHTML = '';
-    if (!state.customers.length) {
-      els.customerList.innerHTML = '<div class="empty-state">أضف أول زبون للبدء.</div>';
-      els.selectedCount.textContent = '0 محدد';
-      return;
-    }
-
-    state.customers.forEach((customer, index) => {
-      const row = document.createElement('label');
-      row.className = 'customer-row';
-      row.innerHTML = `
-        <input type="checkbox" ${state.selectedIds.has(customer.id) ? 'checked' : ''} />
-        <div class="customer-info"><strong>${escapeHtml(customer.name)}</strong><span>${customer.lat.toFixed(5)}, ${customer.lng.toFixed(5)}</span></div>
-        <span class="marker-pill">${index + 1}</span>`;
-      const checkbox = row.querySelector('input');
-      checkbox.addEventListener('change', () => {
-        checkbox.checked ? state.selectedIds.add(customer.id) : state.selectedIds.delete(customer.id);
-        updateSelectedCount();
-      });
-      row.querySelector('.customer-info').addEventListener('click', (e) => {
-        e.preventDefault();
-        state.map.setView([customer.lat, customer.lng], 17);
-        const marker = state.markers.get(customer.id); if (marker) marker.openPopup();
-      });
-      els.customerList.appendChild(row);
-    });
-    updateSelectedCount();
-  }
-
-  function updateSelectedCount() { els.selectedCount.textContent = `${state.selectedIds.size} محدد`; }
-
-  function deleteSelected() {
-    if (!state.selectedIds.size) return toast('لا يوجد زبائن محددون للحذف', true);
-    const count = state.selectedIds.size;
-    state.customers = state.customers.filter(c => !state.selectedIds.has(c.id));
-    state.selectedIds.clear();
-    persistCustomers(); renderCustomers(); updateMapMarkers(); clearRoute();
-    toast(`تم حذف ${count} زبون/زبائن`);
-  }
-
-  function updateMapMarkers() {
-    for (const marker of state.markers.values()) state.map.removeLayer(marker);
-    state.markers.clear();
-    state.customers.forEach((c, idx) => {
-      const icon = L.divIcon({ className: 'custom-div-marker', html: `<div class="customer-map-marker"><span>${idx + 1}</span></div>`, iconSize: [32, 32], iconAnchor: [16, 28] });
-      const marker = L.marker([c.lat, c.lng], { icon }).addTo(state.map).bindPopup(`<strong>${escapeHtml(c.name)}</strong><br><small>${c.lat.toFixed(5)}, ${c.lng.toFixed(5)}</small>`);
-      state.markers.set(c.id, marker);
-    });
-    updateDepotMarker();
-  }
-
-  function updateDepotMarker() {
-    if (state.depotMarker) { state.map.removeLayer(state.depotMarker); state.depotMarker = null; }
-    if (!state.depot) return;
-    const icon = L.divIcon({ className: 'custom-div-marker', html: '<div class="depot-map-marker"><span>ب</span></div>', iconSize: [32, 32], iconAnchor: [16, 28] });
-    state.depotMarker = L.marker([state.depot.lat, state.depot.lng], { icon }).addTo(state.map).bindPopup('<strong>نقطة الانطلاق</strong>');
-  }
-
-  async function optimizeRoutes() {
-    if (!state.depot) return toast('حدد نقطة الانطلاق أولاً', true);
-    const selected = state.customers.filter(c => state.selectedIds.has(c.id));
-    if (selected.length < 2) return toast('حدد زبونين على الأقل للمقارنة', true);
-    if (selected.length > 24) return toast('نسخة الاختبار الحالية تسمح حتى 24 زبوناً في الحساب الواحد', true);
-
-    const consumption = Number(els.consumptionInput.value);
-    if (!Number.isFinite(consumption) || consumption <= 0) return toast('أدخل استهلاك سيارة صحيح', true);
-
-    saveSettings();
-    els.optimizeBtn.disabled = true;
-    const oldText = els.optimizeBtn.textContent;
-    els.optimizeBtn.textContent = 'جاري تحليل الطرق…';
-    els.routeEngineBadge.textContent = 'جاري الاتصال بخدمة الطرق';
-    clearRoute(false);
-
-    const points = [{ id: 'depot', name: 'نقطة الانطلاق', lat: state.depot.lat, lng: state.depot.lng }, ...selected];
-    try {
-      const results = await SalimaRouting.computeRoutes(points, consumption, els.returnDepot.checked);
-      state.routeResults = results.map(r => ({ ...r, points }));
-      renderRouteCards();
-      const source = results[0]?.matrixSource;
-      els.routeEngineBadge.textContent = source === 'osrm' ? 'طرق فعلية • OSRM / OpenStreetMap' : 'وضع تقريبي • تعذر الوصول لخدمة الطرق';
-      await selectRoute(results[0].id);
-      toast('تم حساب المسارات بنجاح');
-    } catch (err) {
-      console.error(err);
-      els.routeEngineBadge.textContent = 'فشل الحساب';
-      toast('تعذر حساب المسارات. تأكد من اتصال الإنترنت ثم حاول مجدداً.', true);
-    } finally {
-      els.optimizeBtn.disabled = false;
-      els.optimizeBtn.textContent = oldText;
-    }
-  }
-
-  function renderRouteCards() {
-    els.routeCards.innerHTML = '';
-    const bestFuel = Math.min(...state.routeResults.map(r => r.metrics.fuel));
-    state.routeResults.forEach(result => {
-      const card = document.createElement('article');
-      card.className = `route-card ${Math.abs(result.metrics.fuel - bestFuel) < 1e-6 ? 'recommended' : ''}`;
-      card.dataset.routeId = result.id;
-      card.innerHTML = `
-        <h3>${result.title}</h3>
-        <div class="route-stat-grid">
-          <div class="route-stat"><span>المسافة</span><strong>${formatDistance(result.metrics.distance)}</strong></div>
-          <div class="route-stat"><span>الوقت</span><strong>${formatDuration(result.metrics.duration)}</strong></div>
-          <div class="route-stat"><span>الوقود التقديري</span><strong>${result.metrics.fuel.toFixed(2)} لتر</strong></div>
-          <div class="route-stat"><span>عدد المحطات</span><strong>${result.points.length - 1}</strong></div>
-        </div>
-        <p class="route-note">${result.note}</p>`;
-      card.addEventListener('click', () => selectRoute(result.id));
-      els.routeCards.appendChild(card);
-    });
-  }
-
-  async function selectRoute(routeId) {
-    const result = state.routeResults.find(r => r.id === routeId);
-    if (!result) return;
-    state.activeRouteId = routeId;
-    document.querySelectorAll('.route-card').forEach(c => c.classList.toggle('active', c.dataset.routeId === routeId));
-    els.routeTitle.textContent = `تفاصيل: ${result.title}`;
-    els.routeStops.innerHTML = '';
-
-    result.order.forEach((idx, orderIndex) => {
-      const p = result.points[idx];
-      const li = document.createElement('li');
-      li.innerHTML = `<strong>${escapeHtml(p.name)}</strong>${idx === 0 ? (orderIndex === 0 ? ' — البداية' : ' — العودة') : ''}`;
-      els.routeStops.appendChild(li);
-    });
-    els.routeDetails.classList.remove('hidden');
-    await drawRoute(result);
-  }
-
-  async function drawRoute(result) {
-    clearMapRouteOnly();
-    const orderedPoints = result.order.map(i => result.points[i]);
-    try {
-      const route = await SalimaRouting.fetchRouteGeometry(orderedPoints);
-      state.routeLayer = L.geoJSON(route.geometry, { style: { weight: 6, opacity: .86 } }).addTo(state.map);
-    } catch (err) {
-      console.warn('Could not fetch route geometry; drawing straight fallback.', err);
-      state.routeLayer = L.polyline(orderedPoints.map(p => [p.lat, p.lng]), { weight: 5, dashArray: '8 8', opacity: .75 }).addTo(state.map);
-    }
-
-    orderedPoints.forEach((p, idx) => {
-      const cm = L.circleMarker([p.lat, p.lng], { radius: idx === 0 ? 9 : 7, weight: 3, fillOpacity: .9 }).addTo(state.map)
-        .bindTooltip(idx === 0 ? 'البداية' : `${idx}. ${p.name}`, { permanent: idx > 0 && orderedPoints.length <= 10, direction: 'top' });
-      state.routeStopLayers.push(cm);
-    });
-    fitActiveRoute();
-  }
-
-  function fitActiveRoute() {
-    if (state.routeLayer) {
-      const bounds = state.routeLayer.getBounds?.();
-      if (bounds?.isValid?.()) state.map.fitBounds(bounds.pad(.12));
-    }
-  }
-
-  function clearMapRouteOnly() {
-    if (state.routeLayer) { state.map.removeLayer(state.routeLayer); state.routeLayer = null; }
-    state.routeStopLayers.forEach(l => state.map.removeLayer(l));
-    state.routeStopLayers = [];
-  }
-
-  function clearRoute(clearResults = true) {
-    clearMapRouteOnly();
-    if (clearResults) state.routeResults = [];
-    state.activeRouteId = null;
-    els.routeDetails.classList.add('hidden');
-    if (clearResults) {
-      els.routeCards.innerHTML = '<div class="result-empty"><div class="result-icon">↗</div><h3>المسارات ستظهر هنا</h3><p>حدد نقطة البداية، اختر زبونين على الأقل، ثم اضغط حساب أفضل المسارات.</p></div>';
-      els.routeEngineBadge.textContent = 'لم يتم الحساب';
-    }
-  }
-
-  function loadDemoData() {
-    const demo = [
-      ['محل تجريبي 1', 32.3117, 35.0272], ['محل تجريبي 2', 32.3172, 35.0335], ['محل تجريبي 3', 32.3057, 35.0390],
-      ['محل تجريبي 4', 32.3005, 35.0227], ['محل تجريبي 5', 32.3220, 35.0194], ['محل تجريبي 6', 32.3090, 35.0452]
-    ];
-    state.customers = demo.map(([name, lat, lng], i) => ({ id: `demo-${Date.now()}-${i}`, name, lat, lng, accuracy: null, source: 'demo', createdAt: new Date().toISOString() }));
-    state.selectedIds = new Set(state.customers.map(c => c.id));
-    if (!state.depot) setDepot({ lat: 32.3104, lng: 35.0285, accuracy: null, source: 'demo' });
-    persistCustomers(); renderCustomers(); updateMapMarkers();
-    state.map.fitBounds(L.latLngBounds(state.customers.map(c => [c.lat, c.lng])).pad(.2));
-    toast('تم تحميل بيانات تجريبية حول طولكرم');
-  }
-
-  function exportData() {
-    const payload = {
-      app: 'Salima Routes', version: 1, exportedAt: new Date().toISOString(),
-      depot: state.depot, customers: state.customers,
-      settings: { consumption: Number(els.consumptionInput.value), returnDepot: els.returnDepot.checked }
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `salima-routes-${new Date().toISOString().slice(0,10)}.json`; a.click();
-    URL.revokeObjectURL(url);
-    toast('تم تصدير البيانات');
-  }
-
-  async function importData(e) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      const data = JSON.parse(await file.text());
-      if (!Array.isArray(data.customers)) throw new Error('Invalid customers');
-      state.customers = data.customers.filter(c => c && c.name && Number.isFinite(Number(c.lat)) && Number.isFinite(Number(c.lng))).map(c => ({ ...c, lat: Number(c.lat), lng: Number(c.lng) }));
-      state.depot = data.depot || null;
-      state.selectedIds.clear();
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state.customers));
-      localStorage.setItem(DEPOT_KEY, JSON.stringify(state.depot));
-      if (data.settings) {
-        els.consumptionInput.value = data.settings.consumption || 9.5;
-        els.returnDepot.checked = data.settings.returnDepot !== false;
-        saveSettings();
-      }
-      renderCustomers(); renderDepot(); updateMapMarkers(); clearRoute();
-      toast(`تم استيراد ${state.customers.length} زبون`);
-    } catch (err) {
-      console.error(err); toast('ملف الاستيراد غير صالح', true);
-    } finally { e.target.value = ''; }
-  }
-
-  function persistCustomers() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state.customers)); }
-  function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify({ consumption: Number(els.consumptionInput.value), returnDepot: els.returnDepot.checked })); }
-  function loadJSON(key, fallback) { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; } }
-
-  function formatDistance(meters) { return `${(meters / 1000).toFixed(meters >= 100000 ? 0 : 1)} كم`; }
-  function formatDuration(seconds) {
-    const mins = Math.round(seconds / 60); const h = Math.floor(mins / 60); const m = mins % 60;
-    return h ? `${h}س ${m}د` : `${m} دقيقة`;
-  }
-  function escapeHtml(str) { return String(str).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch])); }
-  let toastTimer;
-  function toast(message, error = false) {
-    clearTimeout(toastTimer); els.toast.textContent = message; els.toast.classList.toggle('error', error); els.toast.classList.add('show');
-    toastTimer = setTimeout(() => els.toast.classList.remove('show'), 3200);
-  }
-})();
+export const testApi = { validateCustomerName, validCoordinates, normalizeCustomer };

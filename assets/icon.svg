@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="سليمة">
+  <rect width="512" height="512" rx="112" fill="#f4f8fb"/>
+  <text x="256" y="292" text-anchor="middle" font-family="Tahoma,Arial,sans-serif" font-size="154" font-weight="900" fill="#0b4f8a">سليمة</text>
+  <path d="M96 337 C175 316 320 365 416 327" fill="none" stroke="#f4b52c" stroke-width="26" stroke-linecap="round"/>
+  <path d="M258 340 C313 350 365 350 416 327" fill="none" stroke="#e74b35" stroke-width="26" stroke-linecap="round"/>
+</svg>
