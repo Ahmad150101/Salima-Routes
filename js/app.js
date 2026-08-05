@@ -7,6 +7,7 @@ import { validCoordinates, validateCustomerName } from './utils/validation.js';
 import { OsrmProvider } from './routing/osrm-provider.js';
 import { MapManager } from './map/map-manager.js';
 import { MarkerManager } from './map/marker-manager.js';
+import { ensureRTLTextPlugin, retryRTLTextPlugin } from './map/rtl-plugin.js';
 import { RouteRenderer } from './map/route-renderer.js';
 import { Toasts } from './ui/toasts.js';
 import { Dialogs } from './ui/dialogs.js';
@@ -44,6 +45,8 @@ async function init() {
 async function initMap() {
   clearMapError();
   if (!globalThis.maplibregl?.Map) { showMapError('تعذر تحميل مكتبة الخريطة. تحقق من الاتصال ثم أعد المحاولة.', 'LIBRARY_MISSING'); return; }
+  const rtlResult = await ensureRTLTextPlugin();
+  elements.rtlWarning.classList.toggle('hidden', rtlResult.ok);
   const mapElement = document.getElementById('map');
   if (!await waitForMapDimensions(mapElement)) { showMapError('مساحة الخريطة غير جاهزة بعد.', 'CONTAINER_SIZE'); return; }
   try {
@@ -73,6 +76,8 @@ function bindEvents() {
   elements.fitCustomersBtn.addEventListener('click', fitCustomers);
   elements.fitRouteBtn.addEventListener('click', () => routeRenderer?.fit());
   elements.styleSwitcher.addEventListener('click', event => { const button = event.target.closest('[data-style]'); if (button) setMapStyle(button.dataset.style); });
+  elements.toggleCustomerLabels.addEventListener('click', toggleCustomerLabels);
+  elements.retryRtlBtn.addEventListener('click', retryRTLSupport);
   elements.themeBtn.addEventListener('click', toggleTheme);
   elements.helpBtn.addEventListener('click', () => elements.helpDialog.showModal());
   elements.closeHelpBtn.addEventListener('click', () => elements.helpDialog.close());
@@ -185,9 +190,9 @@ async function selectRoute(route) {
 function clearRoute() { routing.abort(); activeRoutes = []; routeCustomers = []; routeRenderer?.clear(); routeResults.empty(); elements.engineBadge.textContent = 'لم يتم الحساب'; renderMarkers(); }
 function fitCustomers() { const points = [...state.customers, ...(state.warehouse ? [state.warehouse] : [])]; mapManager?.fitPoints(points); }
 function renderAll(addedId = null) { customerList.render(state.customers, selected); elements.warehouseSummary.textContent = state.warehouse ? `${state.warehouse.latitude.toFixed(6)}, ${state.warehouse.longitude.toFixed(6)} • جاهز` : 'لم تحدد نقطة البداية بعد.'; renderMarkers(addedId); }
-function renderMarkers(addedId = null, order = []) { markers?.render(state.customers, state.warehouse, order, addedId); }
+function renderMarkers(addedId = null, order = []) { markers?.render(state.customers, state.warehouse, order, addedId, state.uiPreferences.customerNamesVisible !== false); }
 
-function syncSettings() { elements.consumptionInput.value = state.vehicleSettings.consumptionPer100Km; elements.fuelPriceInput.value = state.vehicleSettings.fuelPrice ?? ''; elements.returnWarehouse.checked = state.routePreferences.returnToWarehouse; }
+function syncSettings() { elements.consumptionInput.value = state.vehicleSettings.consumptionPer100Km; elements.fuelPriceInput.value = state.vehicleSettings.fuelPrice ?? ''; elements.returnWarehouse.checked = state.routePreferences.returnToWarehouse; const visible = state.uiPreferences.customerNamesVisible !== false; elements.toggleCustomerLabels.setAttribute('aria-pressed', String(visible)); elements.toggleCustomerLabels.classList.toggle('active', visible); }
 function saveVehicleSettings() { const consumption = Number(elements.consumptionInput.value); state.vehicleSettings.consumptionPer100Km = Number.isFinite(consumption) && consumption > 0 ? consumption : 9.5; state.vehicleSettings.fuelPrice = Number(elements.fuelPriceInput.value) || null; state.routePreferences.returnToWarehouse = elements.returnWarehouse.checked; saveState(); syncSettings(); }
 function saveState() { storage.save(state); }
 
@@ -199,6 +204,8 @@ function loadDemoData() { const base = Date.now(); state.customers = [['متجر
 function applyPreferences() { const systemDark = matchMedia('(prefers-color-scheme: dark)').matches; const theme = state.uiPreferences.theme || (systemDark ? 'dark' : 'light'); document.documentElement.dataset.theme = theme; elements.themeBtn?.setAttribute('aria-pressed', String(theme === 'dark')); }
 function toggleTheme() { const dark = document.documentElement.dataset.theme !== 'dark'; document.documentElement.dataset.theme = dark ? 'dark' : 'light'; state.uiPreferences.theme = dark ? 'dark' : 'light'; elements.themeBtn.setAttribute('aria-pressed', String(dark)); if (dark) setMapStyle('dark'); else if (state.uiPreferences.mapStyle === 'dark') setMapStyle('liberty'); saveState(); }
 function setMapStyle(style) { mapManager?.setStyle(style); state.uiPreferences.mapStyle = style; elements.styleSwitcher.querySelectorAll('[data-style]').forEach(button => button.classList.toggle('active', button.dataset.style === style)); saveState(); }
+function toggleCustomerLabels() { const visible = state.uiPreferences.customerNamesVisible === false; state.uiPreferences.customerNamesVisible = visible; elements.toggleCustomerLabels.setAttribute('aria-pressed', String(visible)); elements.toggleCustomerLabels.classList.toggle('active', visible); markers?.setLabelsVisible(visible); saveState(); }
+async function retryRTLSupport() { elements.retryRtlBtn.disabled = true; const result = await retryRTLTextPlugin(); if (result.reloadRequired) { location.reload(); return; } elements.rtlWarning.classList.toggle('hidden', result.ok); elements.retryRtlBtn.disabled = false; if (result.ok) { mapManager?.localizeLabels(); toasts.show('تم تفعيل عرض النص العربي على الخريطة.', 'success'); } }
 function togglePanel() { const collapsed = elements.controlPanel.classList.toggle('collapsed'); elements.panelHandle.setAttribute('aria-expanded', String(!collapsed)); setTimeout(() => mapManager?.resize(), 300); }
 function openOnboarding() { elements.onboarding.classList.remove('hidden'); elements.startBtn.focus(); }
 function closeOnboarding() { elements.onboarding.classList.add('hidden'); state.uiPreferences.onboardingSeen = true; saveState(); elements.customerName.focus(); }

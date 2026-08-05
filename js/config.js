@@ -9,6 +9,7 @@ export const APP_CONFIG = Object.freeze({
   osrmBaseUrl: 'https://router.project-osrm.org',
   requestTimeoutMs: 12_000,
   cacheTtlMs: 5 * 60_000,
+  rtlPluginUrl: 'https://unpkg.com/@mapbox/mapbox-gl-rtl-text@0.3.0/dist/mapbox-gl-rtl-text.js',
   styles: Object.freeze({
     liberty: Object.freeze({ label: 'Liberty', url: 'https://tiles.openfreemap.org/styles/liberty' }),
     positron: Object.freeze({ label: 'Positron', url: 'https://tiles.openfreemap.org/styles/positron' }),

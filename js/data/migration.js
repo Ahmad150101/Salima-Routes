@@ -12,7 +12,7 @@ export function normalizeCustomer(raw) {
 }
 
 export function createDefaultState() {
-  return { schemaVersion: APP_CONFIG.schemaVersion, customers: [], warehouse: null, vehicleSettings: { consumptionPer100Km: 9.5, fuelPrice: null }, routePreferences: { returnToWarehouse: true }, uiPreferences: { theme: null, mapStyle: 'liberty', onboardingSeen: false } };
+  return { schemaVersion: APP_CONFIG.schemaVersion, customers: [], warehouse: null, vehicleSettings: { consumptionPer100Km: 9.5, fuelPrice: null }, routePreferences: { returnToWarehouse: true }, uiPreferences: { theme: null, mapStyle: 'liberty', customerNamesVisible: true, onboardingSeen: false } };
 }
 
 export function migrateState(raw = {}) {

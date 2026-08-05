@@ -65,7 +65,17 @@ export class MapManager {
     this.onError?.(new MapInitializationError(code, code === 'MAP_SERVER_CONNECTION' ? 'فشل الاتصال بخادم الخرائط.' : 'تعذر تحميل نمط الخريطة.', error));
   }
 
-  localizeLabels() { for (const layer of this.map.getStyle().layers || []) { const field = layer.layout?.['text-field']; if (field && layer.type === 'symbol') try { this.map.setLayoutProperty(layer.id, 'text-field', ['coalesce', ['get', 'name:ar'], ['get', 'name'], ['get', 'name:en']]); } catch { /* Some third-party layers do not accept a replacement expression. */ } } }
+  localizeLabels() {
+    const placeLayerPattern = /(^|[-_])(place|poi|airport|label)([-_]|$)|(^|[-_])(city|town|village|state|country|suburb)([-_]|$)/i;
+    for (const layer of this.map.getStyle().layers || []) {
+      const field = layer.layout?.['text-field'];
+      if (layer.type !== 'symbol' || !field || !placeLayerPattern.test(`${layer.id} ${layer['source-layer'] || ''}`)) continue;
+      const serialized = JSON.stringify(field);
+      if (!serialized.includes('name') || serialized.includes('"ref"')) continue;
+      try { this.map.setLayoutProperty(layer.id, 'text-field', ['coalesce', ['get', 'name:ar'], ['get', 'name'], ['get', 'name:en'], ['get', 'name_en'], ['get', 'name:nonlatin']]); }
+      catch { /* Preserve third-party layers that reject the localized expression. */ }
+    }
+  }
 
   setStyle(styleId) {
     const style = APP_CONFIG.styles[styleId];
