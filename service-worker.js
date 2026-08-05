@@ -1,4 +1,4 @@
-const CACHE = 'salima-routes-shell-v1';
+const CACHE = 'salima-routes-shell-v2';
 const SHELL = ['./', './index.html', './offline.html', './manifest.webmanifest', './assets/icon.svg', './css/styles.css', './js/app.js', './js/config.js', './js/utils/validation.js', './js/utils/geo.js', './js/utils/format.js', './js/data/migration.js', './js/data/storage.js', './js/data/import-export.js', './js/data/customer-store.js', './js/routing/routing-provider.js', './js/routing/osrm-provider.js', './js/routing/local-optimizer.js', './js/map/map-manager.js', './js/map/marker-manager.js', './js/map/route-renderer.js', './js/ui/toasts.js', './js/ui/dialogs.js', './js/ui/customer-list.js', './js/ui/route-results.js'];
 self.addEventListener('install', event => { event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', event => { event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key)))).then(() => self.clients.claim())); });

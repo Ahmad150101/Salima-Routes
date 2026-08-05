@@ -25,7 +25,8 @@ let mapManager, markers, routeRenderer, pendingLocation = null, editingId = null
 const customerList = new CustomerList(elements.customerList, elements.selectedCount, elements.customerSearch, elements.customerFilters, { toggle: toggleCustomer, edit: editCustomer, delete: deleteCustomer });
 const routeResults = new RouteResults(elements.routeCards, elements.routeDetails, { select: id => selectRoute(activeRoutes.find(route => route.id === id)) });
 
-init();
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true });
+else init();
 
 async function init() {
   applyPreferences();
@@ -40,13 +41,19 @@ async function init() {
   registerServiceWorker();
 }
 
-function initMap() {
-  if (!globalThis.maplibregl) { showMapError('تعذر تحميل MapLibre. تحقق من الاتصال ثم أعد المحاولة.'); return; }
+async function initMap() {
+  clearMapError();
+  if (!globalThis.maplibregl?.Map) { showMapError('تعذر تحميل مكتبة الخريطة. تحقق من الاتصال ثم أعد المحاولة.', 'LIBRARY_MISSING'); return; }
+  const mapElement = document.getElementById('map');
+  if (!await waitForMapDimensions(mapElement)) { showMapError('مساحة الخريطة غير جاهزة بعد.', 'CONTAINER_SIZE'); return; }
   try {
-    mapManager = new MapManager('map', state.uiPreferences, handleMapClick).init();
-    mapManager.onReady = () => { elements.mapSkeleton.classList.add('hidden'); markers = new MarkerManager(mapManager.map, { isSelected: id => selected.has(id), toggle: toggleCustomer, edit: editCustomer, delete: deleteCustomer }); routeRenderer = new RouteRenderer(mapManager.map); renderMarkers(); };
-    mapManager.map.on('error', event => { if (!mapManager.loaded) showMapError('تعذر تحميل نمط الخريطة. تحقق من الاتصال بالإنترنت.'); if (event?.error) console.warn('Map style resource error:', event.error.message); });
-  } catch { showMapError('تعذر بدء الخريطة في هذا المتصفح.'); }
+    mapManager?.destroy();
+    mapManager = new MapManager('map', state.uiPreferences, handleMapClick);
+    mapManager.onReady = styleId => { elements.mapSkeleton.classList.add('hidden'); elements.styleSwitcher.querySelectorAll('[data-style]').forEach(button => button.classList.toggle('active', button.dataset.style === styleId)); markers = new MarkerManager(mapManager.map, { isSelected: id => selected.has(id), toggle: toggleCustomer, edit: editCustomer, delete: deleteCustomer }); routeRenderer = new RouteRenderer(mapManager.map); renderMarkers(); };
+    mapManager.onFallback = styleId => { state.uiPreferences.mapStyle = styleId; saveState(); toasts.show('تعذر تحميل Liberty؛ تم الانتقال إلى Positron.', 'warning'); };
+    mapManager.onError = error => showMapError(error.message, error.code, error);
+    mapManager.init();
+  } catch (error) { showMapError(mapErrorMessage(error), error.code || 'UNKNOWN', error); }
 }
 
 function bindEvents() {
@@ -192,12 +199,37 @@ function loadDemoData() { const base = Date.now(); state.customers = [['متجر
 function applyPreferences() { const systemDark = matchMedia('(prefers-color-scheme: dark)').matches; const theme = state.uiPreferences.theme || (systemDark ? 'dark' : 'light'); document.documentElement.dataset.theme = theme; elements.themeBtn?.setAttribute('aria-pressed', String(theme === 'dark')); }
 function toggleTheme() { const dark = document.documentElement.dataset.theme !== 'dark'; document.documentElement.dataset.theme = dark ? 'dark' : 'light'; state.uiPreferences.theme = dark ? 'dark' : 'light'; elements.themeBtn.setAttribute('aria-pressed', String(dark)); if (dark) setMapStyle('dark'); else if (state.uiPreferences.mapStyle === 'dark') setMapStyle('liberty'); saveState(); }
 function setMapStyle(style) { mapManager?.setStyle(style); state.uiPreferences.mapStyle = style; elements.styleSwitcher.querySelectorAll('[data-style]').forEach(button => button.classList.toggle('active', button.dataset.style === style)); saveState(); }
-function togglePanel() { const collapsed = elements.controlPanel.classList.toggle('collapsed'); elements.panelHandle.setAttribute('aria-expanded', String(!collapsed)); setTimeout(() => mapManager?.map.resize(), 300); }
+function togglePanel() { const collapsed = elements.controlPanel.classList.toggle('collapsed'); elements.panelHandle.setAttribute('aria-expanded', String(!collapsed)); setTimeout(() => mapManager?.resize(), 300); }
 function openOnboarding() { elements.onboarding.classList.remove('hidden'); elements.startBtn.focus(); }
 function closeOnboarding() { elements.onboarding.classList.add('hidden'); state.uiPreferences.onboardingSeen = true; saveState(); elements.customerName.focus(); }
 async function showStorageWarning() { const download = await dialogs.confirm({ title: 'تعذر قراءة البيانات المحلية', message: 'احتفظ التطبيق بالنص التالف دون حذفه. هل تريد تنزيل نسخة منه قبل بدء بيانات جديدة؟', confirmLabel: 'تنزيل نسخة' }); if (download) storage.downloadCorruptBackup(); toasts.show('لم تُحذف البيانات التالفة تلقائياً.', 'warning'); }
 async function checkRoutingHealth() { const healthy = await routing.healthCheck(); elements.serviceStatus.className = `service-status ${healthy ? 'online' : 'offline'}`; elements.serviceStatus.innerHTML = `<i></i>${healthy ? ' خدمة الطرق متصلة' : ' الوضع التقديري متاح'}`; }
-function showMapError(message) { elements.mapSkeleton.classList.add('hidden'); elements.mapMessage.textContent = message; elements.mapMessage.classList.remove('hidden'); }
+function mapErrorMessage(error) {
+  const messages = { LIBRARY_MISSING: 'تعذر تحميل مكتبة الخريطة.', WEBGL_UNAVAILABLE: 'WebGL غير متوفر أو معطل في هذا المتصفح.', CONTAINER_MISSING: 'عنصر الخريطة غير موجود.', CONTAINER_SIZE: 'مساحة الخريطة غير جاهزة بعد.', STYLE_LOAD_FAILED: 'تعذر تحميل نمط الخريطة.', MAP_SERVER_CONNECTION: 'فشل الاتصال بخادم الخرائط.' };
+  return messages[error?.code] || 'تعذر إنشاء الخريطة. أعد المحاولة أو تحقق من إعدادات WebGL.';
+}
+function showMapError(message, code = 'UNKNOWN', error = null) {
+  elements.mapSkeleton.classList.add('hidden');
+  elements.mapMessage.replaceChildren();
+  const text = document.createElement('strong'); text.textContent = message;
+  const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'btn primary'; retry.textContent = 'إعادة المحاولة'; retry.addEventListener('click', initMap, { once: true });
+  elements.mapMessage.append(text, retry); elements.mapMessage.classList.remove('hidden');
+  if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') console.error('[Salima Maps]', { code, error });
+}
+function clearMapError() { elements.mapMessage.replaceChildren(); elements.mapMessage.classList.add('hidden'); elements.mapSkeleton.classList.remove('hidden'); }
+function waitForMapDimensions(element, timeoutMs = 2000) {
+  if (!element) return Promise.resolve(false);
+  const started = performance.now();
+  return new Promise(resolve => {
+    const check = () => {
+      const bounds = element.getBoundingClientRect();
+      if (bounds.width > 0 && bounds.height > 0) return resolve(true);
+      if (performance.now() - started >= timeoutMs) return resolve(false);
+      requestAnimationFrame(check);
+    };
+    requestAnimationFrame(check);
+  });
+}
 function setButtonLoading(button, loading, label) { if (loading) { button.dataset.label = button.textContent; button.textContent = label; button.classList.add('loading'); button.disabled = true; } else { button.textContent = button.dataset.label || button.textContent; button.classList.remove('loading'); button.disabled = false; } }
 function reducedMotion() { return matchMedia('(prefers-reduced-motion: reduce)').matches; }
 function registerServiceWorker() { if ('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js').then(registration => { registration.addEventListener('updatefound', () => { const worker = registration.installing; worker?.addEventListener('statechange', () => { if (worker.state === 'installed' && navigator.serviceWorker.controller) toasts.show('يتوفر تحديث جديد. أعد تحميل الصفحة لتطبيقه.', 'info'); }); }); }).catch(() => {}); }
